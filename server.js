@@ -1,17 +1,14 @@
-// server.js - VERİTABANI DESTEKLİ KALICI SÜRÜM
-
-require('dotenv').config(); // .env dosyasını kullanmak için
+// Yeni server.js Kodu
+require('dotenv').config();
 const WebSocket = require('ws');
 const mongoose = require('mongoose');
 
-// --- 1. Veritabanı Bağlantısı ---
-// .env dosyasındaki MONGO_URI değişkenini kullanarak veritabanına bağlanır.
+// --- Veritabanı Bağlantısı ---
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('MongoDB veritabanına başarıyla bağlanıldı.'))
     .catch(err => console.error('MongoDB bağlantı hatası:', err));
 
-// --- 2. Hileci Veri Modeli (Schema) ---
-// Veritabanında her bir hilecinin nasıl bir yapıda saklanacağını belirler.
+// --- Hileci Veri Modeli (Schema) ---
 const cheaterSchema = new mongoose.Schema({
     playerName: { type: String, required: true },
     steamId: { type: String, required: true },
@@ -23,13 +20,12 @@ const cheaterSchema = new mongoose.Schema({
 });
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
-// --- 3. WebSocket Sunucusu ---
+// --- WebSocket Sunucusu ---
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
 console.log(`Sunucu ${port} portunda çalışıyor.`);
 
-// --- 4. Yayın Fonksiyonu ---
-// Gelen bir mesajı tüm bağlı kullanıcılara gönderir.
+// --- Yayın Fonksiyonu ---
 const broadcast = (data) => {
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
@@ -38,33 +34,30 @@ const broadcast = (data) => {
     });
 };
 
-// --- 5. Ana WebSocket Mantığı ---
 wss.on('connection', async ws => {
-    console.log('Yeni bir kullanıcı bağlandı.');
+    console.log('Yeni kullanıcı bağlandı.');
 
-    // YENİ ÖZELLİK: Yeni bağlanan kullanıcıya veritabanındaki tüm listeyi gönder
+    // 1. Yeni bağlanan kullanıcıya mevcut tüm listeyi gönder
     try {
-        const cheaters = await Cheater.find({}); // Veritabanından tüm hilecileri bul
+        const cheaters = await Cheater.find({});
         ws.send(JSON.stringify({ type: 'INITIAL_DATA', data: cheaters }));
     } catch (err) {
         console.error('İlk veri gönderilirken hata:', err);
     }
 
-    // Kullanıcıdan gelen mesajları dinle
+    // 2. Kullanıcıdan gelen mesajları dinle
     ws.on('message', async message => {
         const parsedMessage = JSON.parse(message);
         const { type, data } = parsedMessage;
 
         try {
-            // YENİ ÖZELLİK: Admin yeni hileci eklediğinde...
             if (type === 'CHEATER_ADDED') {
                 const newCheater = new Cheater(data);
-                const savedCheater = await newCheater.save(); // Hileciyi veritabanına KAYDET
+                const savedCheater = await newCheater.save(); // Veritabanına kaydet
                 console.log('Yeni hileci veritabanına eklendi:', savedCheater.playerName);
-                // Kaydedilmiş hileciyi (veritabanından gelen _id ile birlikte) herkese yayınla
-                broadcast({ type: 'CHEATER_ADDED', data: savedCheater });
+                broadcast({ type: 'CHEATER_ADDED', data: savedCheater }); // Herkese yayınla
             }
-            // (Gelecekte silme ve güncelleme işlemleri de buraya eklenebilir)
+            // (Gelecekte CHEATER_DELETED ve UPDATED işlemleri de buraya eklenebilir)
         } catch (err) {
             console.error('Mesaj işlenirken hata:', err);
         }
