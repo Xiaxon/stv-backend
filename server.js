@@ -44,6 +44,7 @@ const cheaterSchema = new mongoose.Schema({
         cheatTypes: [String]
     }]
 }, { timestamps: true });
+
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
 // --- Güvenli Login Endpoint'i ---
@@ -111,6 +112,7 @@ wss.on('connection', async (ws) => {
     ws.on('close', () => console.log('Bir kullanıcının bağlantısı kesildi.'));
 });
 
+// Admin işlemlerini yöneten ana fonksiyon
 async function handleAdminAction(ws, type, data) {
     try {
         switch (type) {

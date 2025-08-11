@@ -1,19 +1,19 @@
 {
   "name": "stv-backend",
   "version": "1.0.0",
-  "description": "STV Hileci Sistemi için Canlı Veri Sunucusu",
+  "description": "STV Cheater List Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "author": "",
+  "author": "XIAXON - LJUPKA - SELAMKIMSENN",
   "license": "ISC",
   "dependencies": {
     "cors": "^2.8.5",
-    "dotenv": "^17.2.1",
-    "express": "^5.1.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.17.1",
-    "ws": "^8.18.3"
+    "mongoose": "^8.4.1",
+    "ws": "^8.17.0"
   }
 }
