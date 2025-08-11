@@ -5,17 +5,22 @@ const express = require('express');
 const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const cors = require('cors');
+const cors = require('cors'); // CORS kütüphanesi
 
 // --- Güvenli Bilgileri Render Environment'dan Okuma ---
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD; // Render'a girdiğiniz şifre
-const JWT_SECRET = process.env.JWT_SECRET;       // Render'a girdiğiniz gizli anahtar
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
 
 // --- Express App ve Sunucu Kurulumu ---
 const app = express();
+
+// --- CORS ÇÖZÜMÜ ---
+// Bu satır, github.io gibi farklı adreslerden gelen isteklere izin verir.
 app.use(cors());
+// -------------------
+
 app.use(express.json());
 
 // --- Veritabanı Bağlantısı ---
@@ -33,6 +38,7 @@ const cheaterSchema = new mongoose.Schema({
     cheatTypes: [String],
     fungunReport: String,
     history: [{
+        _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
         date: { type: Date, default: Date.now },
         serverName: String,
         cheatTypes: [String]
@@ -40,14 +46,13 @@ const cheaterSchema = new mongoose.Schema({
 }, { timestamps: true });
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
-// --- GÜVENLİ LOGIN ENDPOINT'İ ---
+// --- Güvenli Login Endpoint'i ---
 app.post('/login', async (req, res) => {
     const { password } = req.body;
     if (!password || !ADMIN_PASSWORD) {
         return res.status(400).json({ success: false, message: 'İstek geçersiz.' });
     }
     try {
-        // Şifreyi doğrudan karşılaştır
         if (password === ADMIN_PASSWORD) {
             const token = jwt.sign({ isAdmin: true }, JWT_SECRET, { expiresIn: '24h' });
             res.status(200).json({ success: true, token: token });
@@ -85,11 +90,9 @@ wss.on('connection', async (ws) => {
         try {
             const parsedMessage = JSON.parse(message);
             const { type, data, token } = parsedMessage;
-
-            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED'];
+            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED', 'HISTORY_ENTRY_UPDATED'];
 
             if (adminActions.includes(type)) {
-                // GÜVENLİK: TOKEN DOĞRULAMA ADIMI
                 if (!token || !JWT_SECRET) {
                     return ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Yetkiniz yok.' } }));
                 }
@@ -109,8 +112,67 @@ wss.on('connection', async (ws) => {
 });
 
 async function handleAdminAction(ws, type, data) {
-    // ... Sizin orijinal veritabanı işlemleriniz burada ...
-    // Bu bölüm sizin kodunuzla aynı, bir değişiklik yok.
+    try {
+        switch (type) {
+            case 'CHEATER_ADDED': {
+                const existingCheater = await Cheater.findOne({ steamId: data.steamId });
+                if (existingCheater) {
+                    existingCheater.detectionCount += 1;
+                    existingCheater.history.push({ serverName: data.serverName, cheatTypes: data.cheatTypes });
+                    existingCheater.serverName = data.serverName;
+                    const updatedCheater = await existingCheater.save();
+                    broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
+                } else {
+                    const newCheater = new Cheater({ ...data, history: [{ serverName: data.serverName, cheatTypes: data.cheatTypes }] });
+                    const savedCheater = await newCheater.save();
+                    broadcast({ type: 'CHEATER_ADDED', data: savedCheater });
+                }
+                break;
+            }
+            case 'CHEATER_UPDATED': {
+                if (!data._id || !mongoose.Types.ObjectId.isValid(data._id)) return;
+                const updatedCheater = await Cheater.findByIdAndUpdate(data._id, data, { new: true });
+                broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
+                break;
+            }
+            case 'CHEATER_DELETED': {
+                if (!data._id || !mongoose.Types.ObjectId.isValid(data._id)) return;
+                const deletedCheater = await Cheater.findByIdAndDelete(data._id);
+                if (deletedCheater) {
+                    broadcast({ type: 'CHEATER_DELETED', data: { _id: data._id } });
+                }
+                break;
+            }
+            case 'HISTORY_ENTRY_DELETED': {
+                const { cheaterId, historyId } = data;
+                const cheater = await Cheater.findById(cheaterId);
+                if (cheater && cheater.history.id(historyId)) {
+                    cheater.history.pull({ _id: historyId });
+                    cheater.detectionCount = cheater.history.length + 1;
+                    const updatedCheater = await cheater.save();
+                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
+                }
+                break;
+            }
+            case 'HISTORY_ENTRY_UPDATED': {
+                const { cheaterId, historyId, updatedHistoryData } = data;
+                const cheater = await Cheater.findById(cheaterId);
+                if (cheater) {
+                    const historyEntry = cheater.history.id(historyId);
+                    if (historyEntry) {
+                        historyEntry.serverName = updatedHistoryData.serverName;
+                        historyEntry.cheatTypes = updatedHistoryData.cheatTypes;
+                    }
+                    const updatedCheater = await cheater.save();
+                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
+                }
+                break;
+            }
+        }
+    } catch (err) {
+        console.error('Admin işlemi sırasında hata:', err);
+        ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Sunucuda beklenmedik bir hata oluştu.' } }));
+    }
 }
 
 server.listen(PORT, () => {
