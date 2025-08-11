@@ -86,7 +86,6 @@ wss.on('connection', async (ws) => {
         try {
             const parsedMessage = JSON.parse(message);
             const { type, data, token } = parsedMessage;
-
             const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED'];
 
             if (adminActions.includes(type)) {
@@ -97,7 +96,6 @@ wss.on('connection', async (ws) => {
                     if (err) {
                         return ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Geçersiz veya süresi dolmuş token.' } }));
                     }
-                    // Token geçerliyse, işlemi yap
                     await handleAdminAction(ws, type, data);
                 });
             }
@@ -109,7 +107,7 @@ wss.on('connection', async (ws) => {
     ws.on('close', () => console.log('Bir kullanıcının bağlantısı kesildi.'));
 });
 
-// GÜNCELLENDİ: Admin işlemlerini yöneten tam fonksiyon
+// Admin işlemlerini yöneten ana fonksiyon
 async function handleAdminAction(ws, type, data) {
     try {
         switch (type) {
@@ -142,13 +140,22 @@ async function handleAdminAction(ws, type, data) {
                 }
                 break;
             }
+            // --- EKSİK OLAN VE YENİ EKLENEN BÖLÜM ---
             case 'HISTORY_ENTRY_DELETED': {
                 const { cheaterId, historyId } = data;
+                if (!cheaterId || !mongoose.Types.ObjectId.isValid(cheaterId) || !historyId) {
+                    return ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Geçersiz ID.' } }));
+                }
+                
                 const cheater = await Cheater.findById(cheaterId);
                 if (cheater && cheater.history.id(historyId)) {
+                    // Mongoose'un alt dökümanı bulup silme yöntemi
                     cheater.history.id(historyId).remove();
-                    cheater.detectionCount = cheater.history.length + 1; // Tespit sayısını güncelle
+                    // Tespit sayısını yeniden hesapla (kalan geçmiş sayısı + ilk tespit)
+                    cheater.detectionCount = cheater.history.length + 1;
+                    
                     const updatedCheater = await cheater.save();
+                    // Güncellenmiş oyuncu bilgisini herkese gönder
                     broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
                 }
                 break;
