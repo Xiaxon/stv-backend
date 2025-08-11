@@ -39,6 +39,7 @@ const cheaterSchema = new mongoose.Schema({
         cheatTypes: [String]
     }]
 }, { timestamps: true });
+
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
 // --- Güvenli Login Endpoint'i ---
@@ -85,7 +86,7 @@ wss.on('connection', async (ws) => {
         try {
             const parsedMessage = JSON.parse(message);
             const { type, data, token } = parsedMessage;
-            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED']; // HISTORY_ENTRY_UPDATED kaldırıldı
+            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED', 'HISTORY_ENTRY_UPDATED'];
 
             if (adminActions.includes(type)) {
                 if (!token || !JWT_SECRET) {
@@ -106,7 +107,6 @@ wss.on('connection', async (ws) => {
     ws.on('close', () => console.log('Bir kullanıcının bağlantısı kesildi.'));
 });
 
-// Admin işlemlerini yöneten ana fonksiyon
 async function handleAdminAction(ws, type, data) {
     try {
         switch (type) {
@@ -144,10 +144,23 @@ async function handleAdminAction(ws, type, data) {
                 const cheater = await Cheater.findById(cheaterId);
                 if (cheater && cheater.history.id(historyId)) {
                     cheater.history.pull({ _id: historyId });
-                    cheater.detectionCount = cheater.history.length + 1;
+                    cheater.detectionCount = cheater.history.length + 1; // Tespit sayısını GÜNCELLE
                     const updatedCheater = await cheater.save();
-                    // Frontend'in doğru güncellemesi için CHEATER_UPDATED olarak gönderiyoruz
-                    broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
+                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
+                }
+                break;
+            }
+            case 'HISTORY_ENTRY_UPDATED': {
+                const { cheaterId, historyId, updatedHistoryData } = data;
+                const cheater = await Cheater.findById(cheaterId);
+                if (cheater) {
+                    const historyEntry = cheater.history.id(historyId);
+                    if (historyEntry) {
+                        historyEntry.serverName = updatedHistoryData.serverName;
+                        historyEntry.cheatTypes = updatedHistoryData.cheatTypes;
+                    }
+                    const updatedCheater = await cheater.save();
+                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
                 }
                 break;
             }
