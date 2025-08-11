@@ -5,7 +5,7 @@ const express = require('express');
 const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const cors = require('cors'); // CORS kütüphanesi
+const cors = require('cors');
 
 // --- Güvenli Bilgileri Render Environment'dan Okuma ---
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
@@ -15,12 +15,7 @@ const MONGO_URI = process.env.MONGO_URI;
 
 // --- Express App ve Sunucu Kurulumu ---
 const app = express();
-
-// --- CORS ÇÖZÜMÜ ---
-// Bu satır, github.io gibi farklı adreslerden gelen isteklere izin verir.
 app.use(cors());
-// -------------------
-
 app.use(express.json());
 
 // --- Veritabanı Bağlantısı ---
@@ -44,7 +39,6 @@ const cheaterSchema = new mongoose.Schema({
         cheatTypes: [String]
     }]
 }, { timestamps: true });
-
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
 // --- Güvenli Login Endpoint'i ---
@@ -91,7 +85,7 @@ wss.on('connection', async (ws) => {
         try {
             const parsedMessage = JSON.parse(message);
             const { type, data, token } = parsedMessage;
-            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED', 'HISTORY_ENTRY_UPDATED'];
+            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED']; // HISTORY_ENTRY_UPDATED kaldırıldı
 
             if (adminActions.includes(type)) {
                 if (!token || !JWT_SECRET) {
@@ -152,21 +146,8 @@ async function handleAdminAction(ws, type, data) {
                     cheater.history.pull({ _id: historyId });
                     cheater.detectionCount = cheater.history.length + 1;
                     const updatedCheater = await cheater.save();
-                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
-                }
-                break;
-            }
-            case 'HISTORY_ENTRY_UPDATED': {
-                const { cheaterId, historyId, updatedHistoryData } = data;
-                const cheater = await Cheater.findById(cheaterId);
-                if (cheater) {
-                    const historyEntry = cheater.history.id(historyId);
-                    if (historyEntry) {
-                        historyEntry.serverName = updatedHistoryData.serverName;
-                        historyEntry.cheatTypes = updatedHistoryData.cheatTypes;
-                    }
-                    const updatedCheater = await cheater.save();
-                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
+                    // Frontend'in doğru güncellemesi için CHEATER_UPDATED olarak gönderiyoruz
+                    broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
                 }
                 break;
             }
