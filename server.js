@@ -7,23 +7,21 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 
-// --- Güvenli Bilgileri Render Environment'dan Okuma ---
+// --- Güvenli Bilgiler ---
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
 
-// --- Express App ve Sunucu Kurulumu ---
+// --- Kurulumlar ---
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// --- Veritabanı Bağlantısı ---
 mongoose.connect(MONGO_URI)
     .then(() => console.log('MongoDB veritabanına başarıyla bağlanıldı.'))
     .catch(err => console.error('MongoDB bağlantı hatası:', err));
 
-// --- Hileci Veri Modeli (Schema) ---
+// --- GÜNCELLENMİŞ Hileci Veri Modeli (Schema) ---
 const cheaterSchema = new mongoose.Schema({
     playerName: { type: String, required: true },
     steamId: { type: String, required: true, unique: true },
@@ -35,14 +33,19 @@ const cheaterSchema = new mongoose.Schema({
     history: [{
         _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
         date: { type: Date, default: Date.now },
+        // YENİ EKLENEN ALANLAR: Artık her geçmiş kaydı bu detayları tutacak
+        playerName: String,
+        steamId: String,
+        steamProfile: String,
         serverName: String,
-        cheatTypes: [String]
+        cheatTypes: [String],
+        fungunReport: String
     }]
 }, { timestamps: true });
 
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
-// --- Güvenli Login Endpoint'i ---
+// --- Login Endpoint'i ---
 app.post('/login', async (req, res) => {
     const { password } = req.body;
     if (!password || !ADMIN_PASSWORD) {
@@ -114,12 +117,32 @@ async function handleAdminAction(ws, type, data) {
                 const existingCheater = await Cheater.findOne({ steamId: data.steamId });
                 if (existingCheater) {
                     existingCheater.detectionCount += 1;
-                    existingCheater.history.push({ serverName: data.serverName, cheatTypes: data.cheatTypes });
+                    // Yeni geçmiş kaydı, o anki tüm bilgileri içerecek
+                    existingCheater.history.push({ 
+                        playerName: data.playerName,
+                        steamId: data.steamId,
+                        steamProfile: data.steamProfile,
+                        serverName: data.serverName, 
+                        cheatTypes: data.cheatTypes,
+                        fungunReport: data.fungunReport
+                    });
+                    // Ana kaydın son bilgilerini de güncelle
                     existingCheater.serverName = data.serverName;
+                    existingCheater.playerName = data.playerName;
                     const updatedCheater = await existingCheater.save();
                     broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
                 } else {
-                    const newCheater = new Cheater({ ...data, history: [{ serverName: data.serverName, cheatTypes: data.cheatTypes }] });
+                    const newCheater = new Cheater({ 
+                        ...data, 
+                        history: [{ // İlk kayıt da tam bilgiyi içerir
+                            playerName: data.playerName,
+                            steamId: data.steamId,
+                            steamProfile: data.steamProfile,
+                            serverName: data.serverName, 
+                            cheatTypes: data.cheatTypes,
+                            fungunReport: data.fungunReport
+                        }] 
+                    });
                     const savedCheater = await newCheater.save();
                     broadcast({ type: 'CHEATER_ADDED', data: savedCheater });
                 }
@@ -144,9 +167,9 @@ async function handleAdminAction(ws, type, data) {
                 const cheater = await Cheater.findById(cheaterId);
                 if (cheater && cheater.history.id(historyId)) {
                     cheater.history.pull({ _id: historyId });
-                    cheater.detectionCount = cheater.history.length + 1; // Tespit sayısını GÜNCELLE
+                    cheater.detectionCount = cheater.history.length + 1;
                     const updatedCheater = await cheater.save();
-                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
+                    broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
                 }
                 break;
             }
@@ -156,11 +179,16 @@ async function handleAdminAction(ws, type, data) {
                 if (cheater) {
                     const historyEntry = cheater.history.id(historyId);
                     if (historyEntry) {
+                        // Gelen tüm verilerle geçmişi güncelle
+                        historyEntry.playerName = updatedHistoryData.playerName;
+                        historyEntry.steamId = updatedHistoryData.steamId;
+                        historyEntry.steamProfile = updatedHistoryData.steamProfile;
                         historyEntry.serverName = updatedHistoryData.serverName;
                         historyEntry.cheatTypes = updatedHistoryData.cheatTypes;
+                        historyEntry.fungunReport = updatedHistoryData.fungunReport;
                     }
                     const updatedCheater = await cheater.save();
-                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
+                    broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
                 }
                 break;
             }
