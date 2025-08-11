@@ -107,6 +107,7 @@ wss.on('connection', async (ws) => {
     ws.on('close', () => console.log('Bir kullanıcının bağlantısı kesildi.'));
 });
 
+// GÜNCELLENDİ: Admin işlemlerini yöneten tam fonksiyon
 async function handleAdminAction(ws, type, data) {
     try {
         switch (type) {
