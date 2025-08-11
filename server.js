@@ -7,18 +7,16 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 
-// --- Güvenli Bilgileri Render Environment'dan Okuma ---
+// --- Güvenli Bilgiler ---
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
 
-// --- Express App ve Sunucu Kurulumu ---
+// --- Kurulumlar ---
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// --- Veritabanı Bağlantısı ---
 mongoose.connect(MONGO_URI)
     .then(() => console.log('MongoDB veritabanına başarıyla bağlanıldı.'))
     .catch(err => console.error('MongoDB bağlantı hatası:', err));
@@ -35,18 +33,13 @@ const cheaterSchema = new mongoose.Schema({
     history: [{
         _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
         date: { type: Date, default: Date.now },
-        playerName: String,
-        steamId: String,
-        steamProfile: String,
         serverName: String,
-        cheatTypes: [String],
-        fungunReport: String
+        cheatTypes: [String]
     }]
 }, { timestamps: true });
-
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
-// --- Güvenli Login Endpoint'i ---
+// --- Login Endpoint'i ---
 app.post('/login', async (req, res) => {
     const { password } = req.body;
     if (!password || !ADMIN_PASSWORD) {
@@ -60,7 +53,6 @@ app.post('/login', async (req, res) => {
             res.status(401).json({ success: false, message: 'Hatalı şifre' });
         }
     } catch (error) {
-        console.error("Login hatası:", error);
         res.status(500).json({ success: false, message: 'Sunucu hatası' });
     }
 });
@@ -103,9 +95,7 @@ wss.on('connection', async (ws) => {
                     await handleAdminAction(ws, type, data);
                 });
             }
-        } catch (err) {
-            console.error('Mesaj işlenirken hata:', err);
-        }
+        } catch (err) { console.error('Mesaj işlenirken hata:', err); }
     });
 
     ws.on('close', () => console.log('Bir kullanıcının bağlantısı kesildi.'));
@@ -117,31 +107,22 @@ async function handleAdminAction(ws, type, data) {
             case 'CHEATER_ADDED': {
                 const existingCheater = await Cheater.findOne({ steamId: data.steamId });
                 if (existingCheater) {
-                    existingCheater.detectionCount = (existingCheater.detectionCount || 1) + 1;
+                    // Önce mevcut ana bilgileri geçmişe aktar
                     existingCheater.history.push({ 
-                        playerName: data.playerName,
-                        steamId: data.steamId,
-                        steamProfile: data.steamProfile,
-                        serverName: data.serverName, 
-                        cheatTypes: data.cheatTypes,
-                        fungunReport: data.fungunReport
+                        serverName: existingCheater.serverName, 
+                        cheatTypes: existingCheater.cheatTypes 
                     });
+                    // Sonra ana bilgileri yeni tespitle güncelle
+                    existingCheater.detectionCount = existingCheater.history.length + 1;
                     existingCheater.serverName = data.serverName;
-                    existingCheater.playerName = data.playerName;
+                    existingCheater.cheatTypes = data.cheatTypes;
+                    existingCheater.playerName = data.playerName; // Nick de güncellenebilir
+                    
                     const updatedCheater = await existingCheater.save();
                     broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
                 } else {
-                    const newCheater = new Cheater({ 
-                        ...data, 
-                        history: [{
-                            playerName: data.playerName,
-                            steamId: data.steamId,
-                            steamProfile: data.steamProfile,
-                            serverName: data.serverName, 
-                            cheatTypes: data.cheatTypes,
-                            fungunReport: data.fungunReport
-                        }] 
-                    });
+                    // DÜZELTME: Yeni hileci eklendiğinde geçmiş boş başlar.
+                    const newCheater = new Cheater({ ...data, history: [] });
                     const savedCheater = await newCheater.save();
                     broadcast({ type: 'CHEATER_ADDED', data: savedCheater });
                 }
@@ -178,12 +159,8 @@ async function handleAdminAction(ws, type, data) {
                 if (cheater) {
                     const historyEntry = cheater.history.id(historyId);
                     if (historyEntry) {
-                        historyEntry.playerName = updatedHistoryData.playerName;
-                        historyEntry.steamId = updatedHistoryData.steamId;
-                        historyEntry.steamProfile = updatedHistoryData.steamProfile;
                         historyEntry.serverName = updatedHistoryData.serverName;
                         historyEntry.cheatTypes = updatedHistoryData.cheatTypes;
-                        historyEntry.fungunReport = updatedHistoryData.fungunReport;
                     }
                     const updatedCheater = await cheater.save();
                     broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
