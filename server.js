@@ -7,21 +7,23 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 
-// --- Güvenli Bilgiler ---
+// --- Güvenli Bilgileri Render Environment'dan Okuma ---
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI;
 
-// --- Kurulumlar ---
+// --- Express App ve Sunucu Kurulumu ---
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// --- Veritabanı Bağlantısı ---
 mongoose.connect(MONGO_URI)
     .then(() => console.log('MongoDB veritabanına başarıyla bağlanıldı.'))
     .catch(err => console.error('MongoDB bağlantı hatası:', err));
 
-// --- GÜNCELLENMİŞ Hileci Veri Modeli (Schema) ---
+// --- Hileci Veri Modeli (Schema) ---
 const cheaterSchema = new mongoose.Schema({
     playerName: { type: String, required: true },
     steamId: { type: String, required: true, unique: true },
@@ -33,7 +35,6 @@ const cheaterSchema = new mongoose.Schema({
     history: [{
         _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
         date: { type: Date, default: Date.now },
-        // YENİ EKLENEN ALANLAR: Artık her geçmiş kaydı bu detayları tutacak
         playerName: String,
         steamId: String,
         steamProfile: String,
@@ -45,7 +46,7 @@ const cheaterSchema = new mongoose.Schema({
 
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
-// --- Login Endpoint'i ---
+// --- Güvenli Login Endpoint'i ---
 app.post('/login', async (req, res) => {
     const { password } = req.body;
     if (!password || !ADMIN_PASSWORD) {
@@ -116,8 +117,7 @@ async function handleAdminAction(ws, type, data) {
             case 'CHEATER_ADDED': {
                 const existingCheater = await Cheater.findOne({ steamId: data.steamId });
                 if (existingCheater) {
-                    existingCheater.detectionCount += 1;
-                    // Yeni geçmiş kaydı, o anki tüm bilgileri içerecek
+                    existingCheater.detectionCount = (existingCheater.detectionCount || 1) + 1;
                     existingCheater.history.push({ 
                         playerName: data.playerName,
                         steamId: data.steamId,
@@ -126,7 +126,6 @@ async function handleAdminAction(ws, type, data) {
                         cheatTypes: data.cheatTypes,
                         fungunReport: data.fungunReport
                     });
-                    // Ana kaydın son bilgilerini de güncelle
                     existingCheater.serverName = data.serverName;
                     existingCheater.playerName = data.playerName;
                     const updatedCheater = await existingCheater.save();
@@ -134,7 +133,7 @@ async function handleAdminAction(ws, type, data) {
                 } else {
                     const newCheater = new Cheater({ 
                         ...data, 
-                        history: [{ // İlk kayıt da tam bilgiyi içerir
+                        history: [{
                             playerName: data.playerName,
                             steamId: data.steamId,
                             steamProfile: data.steamProfile,
@@ -179,7 +178,6 @@ async function handleAdminAction(ws, type, data) {
                 if (cheater) {
                     const historyEntry = cheater.history.id(historyId);
                     if (historyEntry) {
-                        // Gelen tüm verilerle geçmişi güncelle
                         historyEntry.playerName = updatedHistoryData.playerName;
                         historyEntry.steamId = updatedHistoryData.steamId;
                         historyEntry.steamProfile = updatedHistoryData.steamProfile;
