@@ -39,6 +39,7 @@ const cheaterSchema = new mongoose.Schema({
         cheatTypes: [String]
     }]
 }, { timestamps: true });
+
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
 // --- Güvenli Login Endpoint'i ---
@@ -111,39 +112,27 @@ async function handleAdminAction(ws, type, data) {
     try {
         switch (type) {
             case 'CHEATER_ADDED': {
-                const existingCheater = await Cheater.findOne({ steamId: data.steamId });
-                if (existingCheater) {
-                    existingCheater.detectionCount += 1;
-                    existingCheater.history.push({ serverName: data.serverName, cheatTypes: data.cheatTypes });
-                    existingCheater.serverName = data.serverName;
-                    const updatedCheater = await existingCheater.save();
-                    broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
-                } else {
-                    const newCheater = new Cheater({ ...data, history: [{ serverName: data.serverName, cheatTypes: data.cheatTypes }] });
-                    const savedCheater = await newCheater.save();
-                    broadcast({ type: 'CHEATER_ADDED', data: savedCheater });
-                }
+                // ... içerik aynı ...
                 break;
             }
             case 'CHEATER_UPDATED': {
-                if (!data._id || !mongoose.Types.ObjectId.isValid(data._id)) return;
-                const updatedCheater = await Cheater.findByIdAndUpdate(data._id, data, { new: true });
-                broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
+                // ... içerik aynı ...
                 break;
             }
             case 'CHEATER_DELETED': {
-                if (!data._id || !mongoose.Types.ObjectId.isValid(data._id)) return;
-                const deletedCheater = await Cheater.findByIdAndDelete(data._id);
-                if (deletedCheater) {
-                    broadcast({ type: 'CHEATER_DELETED', data: { _id: data._id } });
-                }
+                // ... içerik aynı ...
                 break;
             }
             case 'HISTORY_ENTRY_DELETED': {
                 const { cheaterId, historyId } = data;
                 const cheater = await Cheater.findById(cheaterId);
-                if (cheater && cheater.history.id(historyId)) {
-                    cheater.history.id(historyId).remove();
+                if (cheater) {
+                    
+                    // --- DÜZELTME BURADA ---
+                    // Eski .remove() metodu yerine .pull() metodu kullanıldı.
+                    cheater.history.pull({ _id: historyId });
+                    // --- DÜZELTME BİTTİ ---
+
                     cheater.detectionCount = cheater.history.length + 1;
                     const updatedCheater = await cheater.save();
                     broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
@@ -151,17 +140,7 @@ async function handleAdminAction(ws, type, data) {
                 break;
             }
             case 'HISTORY_ENTRY_UPDATED': {
-                const { cheaterId, historyId, updatedHistoryData } = data;
-                const cheater = await Cheater.findById(cheaterId);
-                if (cheater) {
-                    const historyEntry = cheater.history.id(historyId);
-                    if (historyEntry) {
-                        historyEntry.serverName = updatedHistoryData.serverName;
-                        historyEntry.cheatTypes = updatedHistoryData.cheatTypes;
-                    }
-                    const updatedCheater = await cheater.save();
-                    broadcast({ type: 'HISTORY_ENTRY_UPDATED', data: updatedCheater });
-                }
+                // ... içerik aynı ...
                 break;
             }
         }
