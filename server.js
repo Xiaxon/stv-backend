@@ -21,7 +21,7 @@ mongoose.connect(MONGO_URI)
     .then(() => console.log('MongoDB veritabanına başarıyla bağlanıldı.'))
     .catch(err => console.error('MongoDB bağlantı hatası:', err));
 
-// --- Hileci Veri Modeli (Schema) ---
+// --- GÜNCELLENMİŞ Hileci Veri Modeli (Schema) ---
 const cheaterSchema = new mongoose.Schema({
     playerName: { type: String, required: true },
     steamId: { type: String, required: true, unique: true },
@@ -33,10 +33,16 @@ const cheaterSchema = new mongoose.Schema({
     history: [{
         _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
         date: { type: Date, default: Date.now },
+        // YENİ EKLENEN ALANLAR: Artık her geçmiş kaydı bu detayları tutacak
+        playerName: String,
+        steamId: String,
+        steamProfile: String,
         serverName: String,
-        cheatTypes: [String]
+        cheatTypes: [String],
+        fungunReport: String
     }]
 }, { timestamps: true });
+
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
 // --- Login Endpoint'i ---
@@ -53,6 +59,7 @@ app.post('/login', async (req, res) => {
             res.status(401).json({ success: false, message: 'Hatalı şifre' });
         }
     } catch (error) {
+        console.error("Login hatası:", error);
         res.status(500).json({ success: false, message: 'Sunucu hatası' });
     }
 });
@@ -95,7 +102,9 @@ wss.on('connection', async (ws) => {
                     await handleAdminAction(ws, type, data);
                 });
             }
-        } catch (err) { console.error('Mesaj işlenirken hata:', err); }
+        } catch (err) {
+            console.error('Mesaj işlenirken hata:', err);
+        }
     });
 
     ws.on('close', () => console.log('Bir kullanıcının bağlantısı kesildi.'));
@@ -109,19 +118,24 @@ async function handleAdminAction(ws, type, data) {
                 if (existingCheater) {
                     // Önce mevcut ana bilgileri geçmişe aktar
                     existingCheater.history.push({ 
+                        playerName: existingCheater.playerName,
+                        steamId: existingCheater.steamId,
+                        steamProfile: existingCheater.steamProfile,
                         serverName: existingCheater.serverName, 
-                        cheatTypes: existingCheater.cheatTypes 
+                        cheatTypes: existingCheater.cheatTypes,
+                        fungunReport: existingCheater.fungunReport
                     });
                     // Sonra ana bilgileri yeni tespitle güncelle
                     existingCheater.detectionCount = existingCheater.history.length + 1;
                     existingCheater.serverName = data.serverName;
+                    existingCheater.playerName = data.playerName;
+                    existingCheater.steamProfile = data.steamProfile;
                     existingCheater.cheatTypes = data.cheatTypes;
-                    existingCheater.playerName = data.playerName; // Nick de güncellenebilir
-                    
+                    existingCheater.fungunReport = data.fungunReport;
                     const updatedCheater = await existingCheater.save();
                     broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
                 } else {
-                    // DÜZELTME: Yeni hileci eklendiğinde geçmiş boş başlar.
+                    // Yeni hileci eklendiğinde geçmişi boş başlar
                     const newCheater = new Cheater({ ...data, history: [] });
                     const savedCheater = await newCheater.save();
                     broadcast({ type: 'CHEATER_ADDED', data: savedCheater });
@@ -159,8 +173,13 @@ async function handleAdminAction(ws, type, data) {
                 if (cheater) {
                     const historyEntry = cheater.history.id(historyId);
                     if (historyEntry) {
+                        // Gelen tüm verilerle geçmişi güncelle
+                        historyEntry.playerName = updatedHistoryData.playerName;
+                        historyEntry.steamId = updatedHistoryData.steamId;
+                        historyEntry.steamProfile = updatedHistoryData.steamProfile;
                         historyEntry.serverName = updatedHistoryData.serverName;
                         historyEntry.cheatTypes = updatedHistoryData.cheatTypes;
+                        historyEntry.fungunReport = updatedHistoryData.fungunReport;
                     }
                     const updatedCheater = await cheater.save();
                     broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
