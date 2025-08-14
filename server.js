@@ -86,7 +86,7 @@ wss.on('connection', async (ws) => {
     broadcastUserCount();
 
     try {
-        const cheaters = await Cheater.find({}).sort({ createdAt: -1 });
+        const cheaters = await Cheater.find({}).sort({ _id: -1 });
         ws.send(JSON.stringify({ type: 'INITIAL_DATA', data: cheaters }));
     } catch (err) {
         ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Veriler yüklenemedi.' } }));
