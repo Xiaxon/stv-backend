@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js"
   },
-  "author": "XIAXON - LJUPKA - SELAMKIMSENN",
+  "author": "XIAXON - LJUPKA - SELAMKIMSEN",
   "license": "ISC",
   "dependencies": {
     "cors": "^2.8.5",
