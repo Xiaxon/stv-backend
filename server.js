@@ -7,7 +7,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 
-// --- Güvenli Bilgileri Render Environment'dan Okuma ---
+// --- Güvenli Bilgileri Environment'dan Okuma ---
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
@@ -45,6 +45,49 @@ const cheaterSchema = new mongoose.Schema({
 }, { timestamps: true });
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
+// --- 5v5 Maç Bilet Modeli (Schema) ---
+const matchTicketSchema = new mongoose.Schema({
+    clanName: { type: String, required: true, trim: true },
+    contactInfo: { type: String, required: true, trim: true },
+    status: { type: String, default: 'Açık', enum: ['Açık', 'Eşleşti', 'Tamamlandı', 'İptal Edildi'] },
+    mapPreference: [String],
+    schedule: String,
+    notes: String,
+    challengerInfo: {
+        clanName: String,
+        contactInfo: String,
+        acceptedAt: Date
+    },
+    // Anti-Spam ve Yönetim için
+    creatorIp: String, 
+    creationTime: { type: Date, default: Date.now },
+}, { timestamps: true });
+
+// Veri Modeli
+const MatchTicket = mongoose.model('MatchTicket', matchTicketSchema);
+
+// --- Anti-Spam: Rate Limit Middleware'i ---
+const ticketCooldowns = {}; // Bellekte (In-memory) basit bir cooldown mekanizması
+
+const RATE_LIMIT_DURATION = 5 * 60 * 1000; // 5 dakika (300000 ms)
+
+const rateLimitTicketCreation = (req, res, next) => {
+    // Gerçek IP adresini almak (Render veya diğer proxy'ler arkasında olmak için)
+    const clientIp = req.headers['x-forwarded-for']?.split(',').shift() || req.socket.remoteAddress;
+
+    const lastCreationTime = ticketCooldowns[clientIp];
+    const now = Date.now();
+
+    if (lastCreationTime && (now - lastCreationTime < RATE_LIMIT_DURATION)) {
+        const remainingTime = Math.ceil((RATE_LIMIT_DURATION - (now - lastCreationTime)) / 1000);
+        return res.status(429).json({ message: `Çok sık bilet oluşturuyorsunuz. Lütfen ${remainingTime} saniye bekleyin.` });
+    }
+
+    req.clientIp = clientIp; // IP'yi istek nesnesine ekle
+    next();
+};
+
+
 // --- Güvenli Login Endpoint'i ---
 app.post('/login', async (req, res) => {
     const { password } = req.body;
@@ -63,6 +106,80 @@ app.post('/login', async (req, res) => {
         res.status(500).json({ success: false, message: 'Sunucu hatası' });
     }
 });
+
+// --- 5v5 Maç Biletleri Rotası ---
+
+// Bilet Oluşturma (Anti-Spam korumalı)
+app.post('/api/tickets', rateLimitTicketCreation, async (req, res) => {
+    try {
+        if (!req.body.clanName || !req.body.contactInfo) {
+             return res.status(400).json({ success: false, message: 'Klan adı ve iletişim zorunludur.' });
+        }
+        
+        const ticketData = {
+            ...req.body,
+            // mapPreference alanını array olarak düzenle
+            mapPreference: Array.isArray(req.body.mapPreference) ? req.body.mapPreference : (req.body.mapPreference ? req.body.mapPreference.split(',').map(t => t.trim()).filter(Boolean) : []),
+            creatorIp: req.clientIp, // Rate Limit middleware'inden gelen IP
+        };
+
+        const newTicket = new MatchTicket(ticketData);
+        const savedTicket = await newTicket.save();
+
+        // Başarılı bilet oluşturuldu, cooldown'u başlat
+        ticketCooldowns[req.clientIp] = Date.now();
+
+        // WebSocket üzerinden anında yayın yap
+        broadcast({ type: 'MATCH_TICKET_ADDED', data: savedTicket });
+
+        res.status(201).json({ success: true, ticket: savedTicket, message: 'Maç bileti başarıyla oluşturuldu.' });
+
+    } catch (err) {
+        console.error('Bilet oluşturma hatası:', err);
+        res.status(400).json({ success: false, message: 'Bilet oluşturulurken hata oluştu.', error: err.message });
+    }
+});
+
+// Açık Biletleri Listeleme (Herkes erişebilir)
+app.get('/api/tickets', async (req, res) => {
+    try {
+        const tickets = await MatchTicket.find({ status: 'Açık' }).sort({ creationTime: -1 });
+        res.status(200).json(tickets);
+    } catch (err) {
+        res.status(500).json({ message: 'Biletler yüklenirken hata oluştu.' });
+    }
+});
+
+// Bilet Kabul Etme/Eşleşme Güncellemesi
+app.put('/api/tickets/:id/accept', async (req, res) => {
+    const { id } = req.params;
+    const { clanName, contactInfo } = req.body;
+    
+    if (!clanName || !contactInfo) {
+        return res.status(400).json({ message: 'Klan adı ve iletişim bilgisi zorunludur.' });
+    }
+
+    try {
+        const ticket = await MatchTicket.findById(id);
+        
+        if (!ticket) return res.status(404).json({ message: 'Bilet bulunamadı.' });
+        if (ticket.status !== 'Açık') return res.status(400).json({ message: 'Bu bilet zaten eşleşmiş veya kapalı.' });
+
+        ticket.status = 'Eşleşti';
+        ticket.challengerInfo = { clanName, contactInfo, acceptedAt: Date.now() };
+
+        const updatedTicket = await ticket.save();
+
+        // WebSocket üzerinden anında yayın yap
+        broadcast({ type: 'MATCH_TICKET_UPDATED', data: updatedTicket });
+
+        res.status(200).json({ success: true, ticket: updatedTicket, message: 'Bilet başarıyla kabul edildi.' });
+
+    } catch (err) {
+        res.status(500).json({ message: 'Bilet kabul edilirken hata oluştu.' });
+    }
+});
+
 
 // --- WebSocket Sunucusu ---
 const server = http.createServer(app);
@@ -87,7 +204,13 @@ wss.on('connection', async (ws) => {
 
     try {
         const cheaters = await Cheater.find({}).sort({ _id: -1 });
-        ws.send(JSON.stringify({ type: 'INITIAL_DATA', data: cheaters }));
+        const openTickets = await MatchTicket.find({ status: 'Açık' }).sort({ creationTime: -1 }); // YENİ: Açık biletleri çek
+
+        // YENİ: Başlangıç verilerini bir obje içinde gönder
+        ws.send(JSON.stringify({ 
+            type: 'INITIAL_DATA', 
+            data: { cheaters, openTickets }
+        })); 
     } catch (err) {
         ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Veriler yüklenemedi.' } }));
     }
@@ -96,7 +219,8 @@ wss.on('connection', async (ws) => {
         try {
             const parsedMessage = JSON.parse(message);
             const { type, data, token } = parsedMessage;
-            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED', 'HISTORY_ENTRY_UPDATED'];
+            // Admin Action listesi olduğu gibi kaldı
+            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED', 'HISTORY_ENTRY_UPDATED']; 
 
             if (adminActions.includes(type)) {
                 if (!token || !JWT_SECRET) {
@@ -120,6 +244,7 @@ wss.on('connection', async (ws) => {
     });
 });
 
+// Mevcut Hileci Admin Aksiyonu Fonksiyonu (Değiştirilmedi)
 async function handleAdminAction(ws, type, data) {
     try {
         switch (type) {
