@@ -206,7 +206,7 @@ wss.on('connection', async (ws) => {
         const cheaters = await Cheater.find({}).sort({ _id: -1 });
         const openTickets = await MatchTicket.find({ status: 'Açık' }).sort({ creationTime: -1 }); // YENİ: Açık biletleri çek
 
-        // YENİ: Başlangıç verilerini bir obje içinde gönder
+        // Başlangıç verilerini bir obje içinde gönder
         ws.send(JSON.stringify({ 
             type: 'INITIAL_DATA', 
             data: { cheaters, openTickets }
