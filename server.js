@@ -7,7 +7,8 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 
-// --- Güvenli Bilgileri Environment'dan Okuma ---
+// --- Güvenli Bilgileri Render Environment'dan Okuma ---
+// Bu değişkenleri kullanabilmek için Render'da Environment Variables (Ortam Değişkenleri) olarak ayarlamanız gerekir.
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
@@ -16,14 +17,21 @@ const MONGO_URI = process.env.MONGO_URI;
 // --- Express App ve Sunucu Kurulumu ---
 const app = express();
 app.use(cors());
+// Gelen isteğin IP adresini alabilmek için proxy trust ayarı (Render gibi platformlar için gereklidir)
+app.set('trust proxy', 1); 
 app.use(express.json());
+
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
 // --- Veritabanı Bağlantısı ---
 mongoose.connect(MONGO_URI)
     .then(() => console.log('MongoDB veritabanına başarıyla bağlanıldı.'))
     .catch(err => console.error('MongoDB bağlantı hatası:', err));
 
-// --- Hileci Veri Modeli (Schema) ---
+// --- Veri Modelleri (Schema) ---
+
+// 1. Hileci Veri Modeli
 const cheaterSchema = new mongoose.Schema({
     playerName: { type: String, required: true },
     steamId: { type: String, required: true, unique: true },
@@ -32,6 +40,7 @@ const cheaterSchema = new mongoose.Schema({
     detectionCount: { type: Number, default: 1 },
     cheatTypes: [String],
     fungunReport: String,
+    createdAt: { type: Date, default: Date.now },
     history: [{
         _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
         date: { type: Date, default: Date.now },
@@ -40,283 +49,288 @@ const cheaterSchema = new mongoose.Schema({
         steamProfile: String,
         serverName: String,
         cheatTypes: [String],
-        fungunReport: String
-    }]
+        fungunReport: String,
+    }],
 }, { timestamps: true });
 const Cheater = mongoose.model('Cheater', cheaterSchema);
 
-// --- 5v5 Maç Bilet Modeli (Schema) ---
-const matchTicketSchema = new mongoose.Schema({
-    clanName: { type: String, required: true, trim: true },
-    contactInfo: { type: String, required: true, trim: true },
-    status: { type: String, default: 'Açık', enum: ['Açık', 'Eşleşti', 'Tamamlandı', 'İptal Edildi'] },
-    mapPreference: [String],
+// 2. 5V5 Maç Bileti Veri Modeli (YENİ)
+const ticketSchema = new mongoose.Schema({
+    clanName: { type: String, required: true },
+    contactInfo: { type: String, required: true },
     schedule: String,
+    mapPreference: [String], // Virgülden ayırıp diziye çevireceğiz
     notes: String,
+    status: { type: String, default: 'Açık' }, // 'Açık', 'Eşleşti'
+    createdAt: { type: Date, default: Date.now },
     challengerInfo: {
         clanName: String,
         contactInfo: String,
         acceptedAt: Date
-    },
-    // Anti-Spam ve Yönetim için
-    creatorIp: String, 
-    creationTime: { type: Date, default: Date.now },
+    }
 }, { timestamps: true });
+const MatchTicket = mongoose.model('MatchTicket', ticketSchema);
 
-// Veri Modeli
-const MatchTicket = mongoose.model('MatchTicket', matchTicketSchema);
 
-// --- Anti-Spam: Rate Limit Middleware'i ---
-const ticketCooldowns = {}; // Bellekte (In-memory) basit bir cooldown mekanizması
+// --- Yardımcı Fonksiyonlar ---
 
-const RATE_LIMIT_DURATION = 5 * 60 * 1000; // 5 dakika (300000 ms)
+// WebSocket'e bağlı tüm client'lara mesaj yayınlar
+function broadcast(data) {
+    const message = JSON.stringify(data);
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
+}
 
-const rateLimitTicketCreation = (req, res, next) => {
-    // Gerçek IP adresini almak (Render veya diğer proxy'ler arkasında olmak için)
-    const clientIp = req.headers['x-forwarded-for']?.split(',').shift() || req.socket.remoteAddress;
+// Token'ı doğrular ve admin yetkisi verir
+const verifyAdmin = (token) => {
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        return decoded.role === 'admin';
+    } catch (err) {
+        return false;
+    }
+};
 
-    const lastCreationTime = ticketCooldowns[clientIp];
+// Basit IP Tabanlı Hız Sınırlama (Rate Limiting)
+const rateLimitStore = {};
+const TICKET_LIMIT_SECONDS = 60 * 5; // 5 dakika
+
+const rateLimitMiddleware = (req, res, next) => {
+    const ip = req.ip; 
     const now = Date.now();
 
-    if (lastCreationTime && (now - lastCreationTime < RATE_LIMIT_DURATION)) {
-        const remainingTime = Math.ceil((RATE_LIMIT_DURATION - (now - lastCreationTime)) / 1000);
-        return res.status(429).json({ message: `Çok sık bilet oluşturuyorsunuz. Lütfen ${remainingTime} saniye bekleyin.` });
+    // 5 dakikalık süre dolmadan tekrar bilet açmaya çalışıyorsa
+    if (rateLimitStore[ip] && (now - rateLimitStore[ip]) < (TICKET_LIMIT_SECONDS * 1000)) {
+        const remainingTimeSeconds = Math.ceil((TICKET_LIMIT_SECONDS * 1000 - (now - rateLimitStore[ip])) / 1000);
+        const remainingMinutes = Math.ceil(remainingTimeSeconds / 60);
+        return res.status(429).json({ message: `Çok hızlı bilet açıyorsunuz. Lütfen ${remainingMinutes} dakika sonra tekrar deneyin.` });
     }
-
-    req.clientIp = clientIp; // IP'yi istek nesnesine ekle
+    
+    // Geçerli IP'yi zaman damgasıyla kaydet
+    rateLimitStore[ip] = now;
     next();
 };
 
 
-// --- Güvenli Login Endpoint'i ---
-app.post('/login', async (req, res) => {
+// --- Express API Rotaları ---
+
+// Admin Giriş
+app.post('/login', (req, res) => {
     const { password } = req.body;
-    if (!password || !ADMIN_PASSWORD) {
-        return res.status(400).json({ success: false, message: 'İstek geçersiz.' });
-    }
-    try {
-        if (password === ADMIN_PASSWORD) {
-            const token = jwt.sign({ isAdmin: true }, JWT_SECRET, { expiresIn: '24h' });
-            res.status(200).json({ success: true, token: token });
-        } else {
-            res.status(401).json({ success: false, message: 'Hatalı şifre' });
-        }
-    } catch (error) {
-        console.error("Login hatası:", error);
-        res.status(500).json({ success: false, message: 'Sunucu hatası' });
+    if (password === ADMIN_PASSWORD) {
+        const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '8h' });
+        res.json({ token });
+    } else {
+        res.status(401).json({ message: 'Yetkilendirme başarısız.' });
     }
 });
 
-// --- 5v5 Maç Biletleri Rotası ---
 
-// Bilet Oluşturma (Anti-Spam korumalı)
-app.post('/api/tickets', rateLimitTicketCreation, async (req, res) => {
+// YENİ ROTA: 5V5 Maç Bileti Oluşturma
+app.post('/api/tickets', rateLimitMiddleware, async (req, res) => {
     try {
-        if (!req.body.clanName || !req.body.contactInfo) {
-             return res.status(400).json({ success: false, message: 'Klan adı ve iletişim zorunludur.' });
-        }
-        
-        const ticketData = {
-            ...req.body,
-            // mapPreference alanını array olarak düzenle
-            mapPreference: Array.isArray(req.body.mapPreference) ? req.body.mapPreference : (req.body.mapPreference ? req.body.mapPreference.split(',').map(t => t.trim()).filter(Boolean) : []),
-            creatorIp: req.clientIp, // Rate Limit middleware'inden gelen IP
-        };
+        const { clanName, contactInfo, schedule, mapPreference, notes } = req.body;
 
-        const newTicket = new MatchTicket(ticketData);
+        // Harita tercihlerini temizle ve diziye çevir
+        const mapsArray = mapPreference ? mapPreference.split(',').map(m => m.trim()).filter(Boolean) : [];
+
+        const newTicket = new MatchTicket({
+            clanName,
+            contactInfo,
+            schedule,
+            mapPreference: mapsArray,
+            notes,
+            status: 'Açık'
+        });
+
         const savedTicket = await newTicket.save();
 
-        // Başarılı bilet oluşturuldu, cooldown'u başlat
-        ticketCooldowns[req.clientIp] = Date.now();
-
-        // WebSocket üzerinden anında yayın yap
+        // Anlık olarak tüm istemcilere bildir
         broadcast({ type: 'MATCH_TICKET_ADDED', data: savedTicket });
 
-        res.status(201).json({ success: true, ticket: savedTicket, message: 'Maç bileti başarıyla oluşturuldu.' });
-
+        res.status(201).json(savedTicket);
     } catch (err) {
         console.error('Bilet oluşturma hatası:', err);
-        res.status(400).json({ success: false, message: 'Bilet oluşturulurken hata oluştu.', error: err.message });
+        res.status(500).json({ message: 'Sunucuda bir hata oluştu.' });
     }
 });
 
-// Açık Biletleri Listeleme (Herkes erişebilir)
-app.get('/api/tickets', async (req, res) => {
-    try {
-        const tickets = await MatchTicket.find({ status: 'Açık' }).sort({ creationTime: -1 });
-        res.status(200).json(tickets);
-    } catch (err) {
-        res.status(500).json({ message: 'Biletler yüklenirken hata oluştu.' });
-    }
-});
-
-// Bilet Kabul Etme/Eşleşme Güncellemesi
+// YENİ ROTA: Maç Bileti Kabul Etme (Eşleştirme)
 app.put('/api/tickets/:id/accept', async (req, res) => {
-    const { id } = req.params;
-    const { clanName, contactInfo } = req.body;
-    
-    if (!clanName || !contactInfo) {
-        return res.status(400).json({ message: 'Klan adı ve iletişim bilgisi zorunludur.' });
-    }
-
     try {
-        const ticket = await MatchTicket.findById(id);
+        const ticketId = req.params.id;
+        const { clanName, contactInfo } = req.body;
+
+        if (!clanName || !contactInfo) {
+            return res.status(400).json({ message: 'Klan adı ve iletişim bilgisi zorunludur.' });
+        }
+
+        // Biletin mevcut durumunu kontrol et
+        const existingTicket = await MatchTicket.findById(ticketId);
+        if (!existingTicket) {
+             return res.status(404).json({ message: 'Bilet bulunamadı.' });
+        }
+        if (existingTicket.status !== 'Açık') {
+             return res.status(400).json({ message: 'Bu bilet zaten eşleşti veya kapatıldı.' });
+        }
+
+        const updatedTicket = await MatchTicket.findByIdAndUpdate(
+            ticketId,
+            {
+                $set: {
+                    status: 'Eşleşti',
+                    challengerInfo: {
+                        clanName,
+                        contactInfo,
+                        acceptedAt: new Date()
+                    }
+                }
+            },
+            { new: true } // Güncellenmiş dokümanı döndür
+        );
+
         
-        if (!ticket) return res.status(404).json({ message: 'Bilet bulunamadı.' });
-        if (ticket.status !== 'Açık') return res.status(400).json({ message: 'Bu bilet zaten eşleşmiş veya kapalı.' });
-
-        ticket.status = 'Eşleşti';
-        ticket.challengerInfo = { clanName, contactInfo, acceptedAt: Date.now() };
-
-        const updatedTicket = await ticket.save();
-
-        // WebSocket üzerinden anında yayın yap
+        // Bilet listesi güncelleneceği için anlık bildirim gönder
         broadcast({ type: 'MATCH_TICKET_UPDATED', data: updatedTicket });
 
-        res.status(200).json({ success: true, ticket: updatedTicket, message: 'Bilet başarıyla kabul edildi.' });
-
+        res.json(updatedTicket);
     } catch (err) {
-        res.status(500).json({ message: 'Bilet kabul edilirken hata oluştu.' });
+        console.error('Bilet kabul etme hatası:', err);
+        res.status(500).json({ message: 'Sunucuda bir hata oluştu.' });
     }
 });
 
 
-// --- WebSocket Sunucusu ---
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+// --- WebSocket İşlemleri ---
 
-const broadcast = (data) => {
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify(data));
-        }
-    });
-};
-
-// Aktif kullanıcı sayısını herkese duyuran fonksiyon
-function broadcastUserCount() {
-    broadcast({ type: 'USER_COUNT_UPDATE', data: { count: wss.clients.size } });
-}
-
-wss.on('connection', async (ws) => {
-    console.log('Yeni bir kullanıcı bağlandı.');
-    broadcastUserCount();
-
+wss.on('connection', async (ws, req) => {
+    // İlk bağlantıda tüm verileri gönder
     try {
-        const cheaters = await Cheater.find({}).sort({ _id: -1 });
-        const openTickets = await MatchTicket.find({ status: 'Açık' }).sort({ creationTime: -1 }); // YENİ: Açık biletleri çek
+        // Hilecileri tespit sayısına göre azalan, sonra oluşturulma tarihine göre azalan sırada getir
+        const cheaters = await Cheater.find().sort({ detectionCount: -1, createdAt: -1 });
+        // Açık olan biletleri en yenisi en üstte olacak şekilde getir
+        const openTickets = await MatchTicket.find({ status: 'Açık' }).sort({ createdAt: -1 });
 
-        // Başlangıç verilerini bir obje içinde gönder
-        ws.send(JSON.stringify({ 
-            type: 'INITIAL_DATA', 
-            data: { cheaters, openTickets }
-        })); 
-    } catch (err) {
-        ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Veriler yüklenemedi.' } }));
-    }
+        ws.send(JSON.stringify({ type: 'INITIAL_DATA', data: { cheaters, openTickets } }));
 
-    ws.on('message', async (message) => {
-        try {
-            const parsedMessage = JSON.parse(message);
-            const { type, data, token } = parsedMessage;
-            // Admin Action listesi olduğu gibi kaldı
-            const adminActions = ['CHEATER_ADDED', 'CHEATER_UPDATED', 'CHEATER_DELETED', 'HISTORY_ENTRY_DELETED', 'HISTORY_ENTRY_UPDATED']; 
+        // Kullanıcı sayısını güncelle
+        broadcast({ type: 'USER_COUNT_UPDATE', data: { count: wss.clients.size } });
 
-            if (adminActions.includes(type)) {
-                if (!token || !JWT_SECRET) {
-                    return ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Yetkiniz yok.' } }));
-                }
-                jwt.verify(token, JWT_SECRET, async (err, decoded) => {
-                    if (err) {
-                        return ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Geçersiz veya süresi dolmuş token.' } }));
-                    }
-                    await handleAdminAction(ws, type, data);
-                });
+        ws.on('message', async (message) => {
+            let data;
+            try {
+                data = JSON.parse(message);
+            } catch (e) {
+                console.error('Geçersiz JSON alındı:', message);
+                return;
             }
-        } catch (err) {
-            console.error('Mesaj işlenirken hata:', err);
-        }
-    });
+
+            // Sadece admin işlemlerini yetkilendir
+            if (data.token && verifyAdmin(data.token)) {
+                await handleAdminAction(data, ws);
+            } else if (data.token) {
+                // Hatalı token ile admin işlemi yapmaya çalışanı bilgilendir
+                ws.send(JSON.stringify({ type: 'ERROR_OCCURRED', data: { message: 'Yetkiniz yok.' } }));
+            }
+        });
+
+    } catch (err) {
+        console.error('WS bağlantı hatası:', err);
+    }
 
     ws.on('close', () => {
-        console.log('Bir kullanıcının bağlantısı kesildi.');
-        broadcastUserCount();
+        // Kullanıcı ayrıldığında sayıyı güncelle
+        broadcast({ type: 'USER_COUNT_UPDATE', data: { count: wss.clients.size } });
     });
 });
 
-// Mevcut Hileci Admin Aksiyonu Fonksiyonu (Değiştirilmedi)
-async function handleAdminAction(ws, type, data) {
+// Admin aksiyonlarını ele alır
+async function handleAdminAction(data, ws) {
     try {
-        switch (type) {
+        switch (data.type) {
             case 'CHEATER_ADDED': {
-                const existingCheater = await Cheater.findOne({ steamId: data.steamId });
-                if (existingCheater) {
-                    existingCheater.history.push({ 
-                        playerName: existingCheater.playerName,
-                        steamId: existingCheater.steamId,
-                        steamProfile: existingCheater.steamProfile,
-                        serverName: existingCheater.serverName, 
-                        cheatTypes: existingCheater.cheatTypes,
-                        fungunReport: existingCheater.fungunReport
-                    });
-                    existingCheater.detectionCount = existingCheater.history.length + 1;
-                    existingCheater.serverName = data.serverName;
-                    existingCheater.playerName = data.playerName;
-                    existingCheater.steamProfile = data.steamProfile;
-                    existingCheater.cheatTypes = data.cheatTypes;
-                    existingCheater.fungunReport = data.fungunReport;
-                    const updatedCheater = await existingCheater.save();
-                    broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
-                } else {
-                    const newCheater = new Cheater({ ...data, history: [] });
-                    const savedCheater = await newCheater.save();
-                    broadcast({ type: 'CHEATER_ADDED', data: savedCheater });
+                const { playerName, steamId, steamProfile, serverName, cheatTypes, fungunReport } = data.data;
+
+                // Geçmiş kaydı oluştur
+                const initialHistory = {
+                    playerName,
+                    steamId,
+                    steamProfile,
+                    serverName,
+                    cheatTypes,
+                    fungunReport,
+                    date: new Date()
+                };
+
+                const newCheater = new Cheater({
+                    playerName,
+                    steamId,
+                    steamProfile,
+                    serverName,
+                    detectionCount: 1,
+                    cheatTypes,
+                    fungunReport,
+                    history: [initialHistory]
+                });
+
+                const savedCheater = await newCheater.save();
+                broadcast({ type: 'CHEATER_ADDED', data: savedCheater });
+                break;
+            }
+            case 'CHEATER_DELETED': {
+                const { _id } = data.data;
+                const deletedCheater = await Cheater.findByIdAndDelete(_id);
+                if (deletedCheater) {
+                    broadcast({ type: 'CHEATER_DELETED', data: { _id } });
                 }
                 break;
             }
             case 'CHEATER_UPDATED': {
-                if (!data._id || !mongoose.Types.ObjectId.isValid(data._id)) return;
-                const updatedCheater = await Cheater.findByIdAndUpdate(data._id, data, { new: true });
-                broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
-                break;
-            }
-            case 'CHEATER_DELETED': {
-                if (!data._id || !mongoose.Types.ObjectId.isValid(data._id)) return;
-                const deletedCheater = await Cheater.findByIdAndDelete(data._id);
-                if (deletedCheater) {
-                    broadcast({ type: 'CHEATER_DELETED', data: { _id: data._id } });
-                }
-                break;
-            }
-            case 'HISTORY_ENTRY_DELETED': {
-                const { cheaterId, historyId } = data;
-                const cheater = await Cheater.findById(cheaterId);
-                if (cheater && cheater.history.id(historyId)) {
-                    cheater.history.pull({ _id: historyId });
-                    cheater.detectionCount = cheater.history.length + 1;
-                    const updatedCheater = await cheater.save();
-                    broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
-                }
-                break;
-            }
-            case 'HISTORY_ENTRY_UPDATED': {
-                const { cheaterId, historyId, updatedHistoryData } = data;
-                const cheater = await Cheater.findById(cheaterId);
+                const { _id, ...updateData } = data.data;
+                const cheater = await Cheater.findById(_id);
+
                 if (cheater) {
-                    const historyEntry = cheater.history.id(historyId);
-                    if (historyEntry) {
-                        historyEntry.playerName = updatedHistoryData.playerName;
-                        historyEntry.steamId = updatedHistoryData.steamId;
-                        historyEntry.steamProfile = updatedHistoryData.steamProfile;
-                        historyEntry.serverName = updatedHistoryData.serverName;
-                        historyEntry.cheatTypes = updatedHistoryData.cheatTypes;
-                        historyEntry.fungunReport = updatedHistoryData.fungunReport;
+                    // Ana kaydı güncelle
+                    // MongoDB'deki history alanını korumak için sadece ana alanları güncelliyoruz
+                    cheater.playerName = updateData.playerName;
+                    cheater.steamId = updateData.steamId;
+                    cheater.steamProfile = updateData.steamProfile;
+                    cheater.serverName = updateData.serverName;
+                    cheater.detectionCount = updateData.detectionCount;
+                    cheater.cheatTypes = updateData.cheatTypes;
+                    cheater.fungunReport = updateData.fungunReport;
+                    
+                    // Yeni bir geçmiş kaydı eklemek için kontrol yapıyoruz
+                    const lastHistory = cheater.history.length > 0 ? cheater.history[cheater.history.length - 1] : null;
+                    const isNewEntryRequired = !lastHistory || 
+                        lastHistory.playerName !== updateData.playerName ||
+                        lastHistory.steamId !== updateData.steamId ||
+                        lastHistory.serverName !== updateData.serverName ||
+                        updateData.detectionCount > cheater.history.length; // Tespit sayısı geçmiş kaydından fazlaysa yeni kayıt eklenir.
+
+                    if (isNewEntryRequired) {
+                        // Yeni tespit veya ana verilerde anlamlı bir değişiklik varsa geçmişe ekle
+                        cheater.history.push({
+                            playerName: updateData.playerName,
+                            steamId: updateData.steamId,
+                            steamProfile: updateData.steamProfile,
+                            serverName: updateData.serverName,
+                            cheatTypes: updateData.cheatTypes,
+                            fungunReport: updateData.fungunReport,
+                            date: new Date(),
+                        });
                     }
+                    
                     const updatedCheater = await cheater.save();
+                    // Frontend'deki WebSocket bağlantılarına güncel veriyi gönder
                     broadcast({ type: 'CHEATER_UPDATED', data: updatedCheater });
                 }
                 break;
             }
+            // NOT: HISTORY_ENTRY_DELETED/UPDATED gibi detaylı geçmiş işlemleri bu versiyonda devre dışı bırakılmıştır.
         }
     } catch (err) {
         console.error('Admin işlemi sırasında hata:', err);
